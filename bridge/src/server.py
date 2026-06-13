@@ -1,15 +1,15 @@
 """
-aiohttp WebSocket server exposing RaceState to the frontend.
+Pit Wall — aiohttp WebSocket server.
 
-Routes:
-  GET /health  — health check
-  GET /state   — latest RaceState snapshot as JSON
-  GET /ws      — WebSocket upgrade; broadcasts every update
+Endpoints:
+  GET /health  → {"status": "ok", "source": "bridge"|"no_live_session", "connectedClients": N}
+  GET /state   → current RaceState JSON snapshot
+  GET /ws      → WebSocket upgrade; broadcasts on each update
 """
 import asyncio
 import json
 import logging
-import weakref
+import time
 
 from aiohttp import web
 
@@ -18,70 +18,87 @@ logger = logging.getLogger("pitwall.server")
 
 class WebSocketServer:
     def __init__(self, config: dict, queue: asyncio.Queue):
-        self._port = config.get("ws_port", 8771)
-        self._queue = queue
-        self._clients: weakref.WeakSet = weakref.WeakSet()
-        self._latest_state: dict | None = None
-
-    async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse(heartbeat=30)
-        await ws.prepare(request)
-        self._clients.add(ws)
-        logger.info("Client connected (total %d)", len(self._clients))
-
-        # send current snapshot immediately
-        if self._latest_state:
-            await ws.send_str(json.dumps(self._latest_state))
-
-        try:
-            async for _ in ws:
-                pass  # we don't expect messages from the client
-        except Exception:
-            pass
-        finally:
-            logger.info("Client disconnected")
-        return ws
-
-    async def _state_handler(self, _request: web.Request) -> web.Response:
-        if self._latest_state is None:
-            return web.json_response(
-                {"error": "no_state_yet"}, status=503
-            )
-        return web.json_response(self._latest_state)
-
-    async def _health_handler(self, _request: web.Request) -> web.Response:
-        return web.json_response(
-            {
-                "status": "ok",
-                "source": "bridge" if self._latest_state else "no_live_session",
-                "connectedClients": len(self._clients),
-            }
-        )
-
-    async def _broadcast_loop(self):
-        while True:
-            state = await self._queue.get()
-            self._latest_state = state
-            payload = json.dumps(state)
-            dead = []
-            for ws in list(self._clients):
-                try:
-                    await ws.send_str(payload)
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                self._clients.discard(ws)
+        self.port = config.get("ws_port", 8771)
+        self.heartbeat_interval = config.get("heartbeat_interval", 30)
+        self.queue = queue
+        self._clients: set[web.WebSocketResponse] = set()
+        self._current_state: dict | None = None
+        self._app = web.Application()
+        self._app.router.add_get("/health", self._health)
+        self._app.router.add_get("/state", self._state)
+        self._app.router.add_get("/ws", self._ws_handler)
 
     async def run(self):
-        app = web.Application()
-        app.router.add_get("/ws", self._ws_handler)
-        app.router.add_get("/state", self._state_handler)
-        app.router.add_get("/health", self._health_handler)
-
-        runner = web.AppRunner(app)
+        runner = web.AppRunner(self._app)
         await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", self._port)
+        site = web.TCPSite(runner, "0.0.0.0", self.port)
         await site.start()
-        logger.info("Server listening on ws://localhost:%d", self._port)
+        logger.info("WebSocket server listening on ws://0.0.0.0:%d/ws", self.port)
 
-        await self._broadcast_loop()
+        # Broadcast loop
+        while True:
+            try:
+                state = await asyncio.wait_for(self.queue.get(), timeout=self.heartbeat_interval)
+                self._current_state = state
+                await self._broadcast(state)
+            except asyncio.TimeoutError:
+                # Send heartbeat ping to detect dead connections
+                dead = set()
+                for ws in self._clients:
+                    try:
+                        await ws.ping()
+                    except Exception:
+                        dead.add(ws)
+                for ws in dead:
+                    self._clients.discard(ws)
+
+    async def _broadcast(self, state: dict):
+        if not self._clients:
+            return
+        payload = json.dumps(state)
+        dead = set()
+        for ws in list(self._clients):
+            try:
+                await ws.send_str(payload)
+            except Exception:
+                dead.add(ws)
+        for ws in dead:
+            self._clients.discard(ws)
+        logger.debug("Broadcast to %d client(s)", len(self._clients) - len(dead))
+
+    async def _health(self, request: web.Request) -> web.Response:
+        source = "bridge" if self._current_state else "no_live_session"
+        return web.json_response({
+            "status": "ok",
+            "source": source,
+            "connectedClients": len(self._clients),
+            "lastUpdate": self._current_state.get("updatedAt") if self._current_state else None,
+        })
+
+    async def _state(self, request: web.Request) -> web.Response:
+        if self._current_state is None:
+            return web.json_response({"error": "no state available"}, status=503)
+        return web.json_response(self._current_state)
+
+    async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        self._clients.add(ws)
+        client_addr = request.remote
+        logger.info("Client connected: %s (total=%d)", client_addr, len(self._clients))
+
+        # Send current state immediately if available
+        if self._current_state is not None:
+            try:
+                await ws.send_str(json.dumps(self._current_state))
+            except Exception:
+                pass
+
+        try:
+            async for msg in ws:
+                pass  # We don't process inbound messages from frontend
+        finally:
+            self._clients.discard(ws)
+            logger.info("Client disconnected: %s (total=%d)", client_addr, len(self._clients))
+
+        return ws

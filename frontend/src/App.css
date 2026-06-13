@@ -9,11 +9,21 @@
   --cyan:     #5BC8FF;
   --purple:   #9B59B6;
   --text:     #D0D3D8;
-  --dim:      #666;
+  --dim:      #6B7280;
   --border:   #2a2d33;
   --radius:   4px;
   --mono:     'Courier New', 'Consolas', monospace;
   --sans:     'Segoe UI', system-ui, sans-serif;
+
+  /* Aliases used by inline-styled components */
+  --color-bg:      #0A0B0D;
+  --color-surface: #16181C;
+  --color-amber:   #FFB000;
+  --color-green:   #3DDC84;
+  --color-red:     #FF4D4D;
+  --color-cyan:    #5BC8FF;
+  --color-text:    #D0D3D8;
+  --color-dim:     #6B7280;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }

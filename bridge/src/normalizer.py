@@ -1,82 +1,70 @@
 """
-Maps raw Timing71 CTD (Common Timing Data) to the internal RaceState schema.
-CTD format is partially documented; fields are reverse-engineered from relay dumps.
+Pit Wall — CTD → RaceState normalizer.
+
+Maps raw Timing71 CTD (Canonical Timing Data) to the RaceState schema
+expected by the frontend. All fields are optional-safe with sensible defaults.
+
+CTD column indices (WEC variant):
+  0: position
+  1: car number
+  2: driver name (current)
+  3: team
+  4: car class / category
+  5: gap to leader
+  6: interval
+  7: lap count
+  8: last lap time
+  9: best lap time
+  10: S1
+  11: S2
+  12: S3
+  13: pit status flag
+  14: track progress (proprietary extension, may be absent)
 """
+import re
 import time
+from typing import Any
 
+# CTD column indices
+COL_POS = 0
+COL_NUMBER = 1
+COL_DRIVER = 2
+COL_TEAM = 3
+COL_CLASS = 4
+COL_GAP = 5
+COL_INTERVAL = 6
+COL_LAPS = 7
+COL_LAST_LAP = 8
+COL_BEST_LAP = 9
+COL_S1 = 10
+COL_S2 = 11
+COL_S3 = 12
+COL_PIT = 13
+COL_TRACK_PROGRESS = 14
 
-def _safe(val, default="—"):
-    return val if val is not None else default
-
-
-def _sector_status(time_val, best_val, prev_val):
-    """Determine sector status from CTD numeric values."""
-    if time_val is None:
-        return None
-    try:
-        t = float(time_val)
-        b = float(best_val) if best_val else None
-        p = float(prev_val) if prev_val else None
-        if b is not None and t <= b:
-            return "best"
-        if p is not None and t < p:
-            return "improved"
-        return "normal"
-    except (TypeError, ValueError):
-        return "normal"
-
-
-def _format_time(seconds):
-    """Convert float seconds to 'm:ss.SSS' string."""
-    if seconds is None:
-        return None
-    try:
-        s = float(seconds)
-        mins = int(s // 60)
-        secs = s - mins * 60
-        return f"{mins}:{secs:06.3f}"
-    except (TypeError, ValueError):
-        return str(seconds)
-
-
-def _format_sector(seconds):
-    """Convert float seconds to 'ss.S' string for sector display."""
-    if seconds is None:
-        return None
-    try:
-        return f"{float(seconds):.1f}"
-    except (TypeError, ValueError):
-        return str(seconds)
-
-
-def _gap_string(value):
-    if value is None:
-        return "—"
-    if isinstance(value, str):
-        return value
-    try:
-        f = float(value)
-        if f < 0:
-            return "—"
-        if f == 0:
-            return "+0.000"
-        return f"+{f:.3f}"
-    except (TypeError, ValueError):
-        return str(value)
-
-
-# Timing71 category codes to internal names
-CATEGORY_MAP = {
-    "H": "HYPERCAR",
-    "HYPERCAR": "HYPERCAR",
-    "LMP2": "LMP2",
-    "L": "LMP2",
-    "GT3": "LMGT3",
-    "LMGT3": "LMGT3",
-    "G": "LMGT3",
+# Timing71 sector state flags → our status
+SECTOR_STATUS_MAP = {
+    "pb": "best",
+    "sb": "best",
+    "best": "best",
+    "improved": "improved",
+    "slow": "normal",
+    "normal": "normal",
+    None: "normal",
 }
 
-FLAG_MAP = {
+CATEGORY_ALIASES = {
+    "hypercar": "HYPERCAR",
+    "lmh": "HYPERCAR",
+    "wec-h": "HYPERCAR",
+    "lmp2": "LMP2",
+    "p2": "LMP2",
+    "lmgt3": "LMGT3",
+    "gt3": "LMGT3",
+    "gte": "LMGT3",
+}
+
+FLAG_ALIASES = {
     "green": "green",
     "yellow": "yellow",
     "red": "red",
@@ -85,114 +73,223 @@ FLAG_MAP = {
     "fcy": "fcy",
     "full course yellow": "fcy",
     "chequered": "chequered",
+    "checkered": "chequered",
     "finish": "chequered",
 }
 
 
-def normalize_ctd(raw: dict) -> dict:
+def _safe_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _map_category(raw: str) -> str:
+    key = raw.lower().strip()
+    return CATEGORY_ALIASES.get(key, "HYPERCAR")
+
+
+def _map_flag(raw: str) -> str:
+    key = raw.lower().strip()
+    for alias, flag in FLAG_ALIASES.items():
+        if alias in key:
+            return flag
+    return "green"
+
+
+def _map_sector_status(raw: Any) -> str:
+    if isinstance(raw, dict):
+        raw = raw.get("status") or raw.get("state")
+    key = _safe_str(raw).lower() if raw else None
+    return SECTOR_STATUS_MAP.get(key, "normal")
+
+
+def _parse_sector(cell: Any) -> dict | None:
+    """Parse a CTD sector cell into {time, status} or None."""
+    if cell is None or cell == "":
+        return None
+    if isinstance(cell, dict):
+        t = _safe_str(cell.get("value") or cell.get("time"))
+        status = _map_sector_status(cell.get("status") or cell.get("state"))
+    elif isinstance(cell, list) and len(cell) >= 1:
+        t = _safe_str(cell[0])
+        status = _map_sector_status(cell[1] if len(cell) > 1 else None)
+    else:
+        t = _safe_str(cell)
+        status = "normal"
+
+    if not t or t in ("-", "--", "0", "0.000"):
+        return None
+    return {"time": t, "status": status}
+
+
+def _get_col(row: list | dict, index: int, key: str = "", default: Any = None) -> Any:
+    """Get value from row by index (list) or key (dict)."""
+    if isinstance(row, list):
+        try:
+            return row[index]
+        except IndexError:
+            return default
+    elif isinstance(row, dict):
+        return row.get(key, row.get(str(index), default))
+    return default
+
+
+def _normalize_car(entry: Any, position: int) -> dict:
+    """Normalize a single car entry from CTD to CarState dict."""
+    row = entry if isinstance(entry, (list, dict)) else []
+
+    number = _safe_str(_get_col(row, COL_NUMBER, "number", str(position)))
+    driver = _safe_str(_get_col(row, COL_DRIVER, "driver", "Unknown"))
+    team = _safe_str(_get_col(row, COL_TEAM, "team", "Unknown"))
+    category = _map_category(_safe_str(_get_col(row, COL_CLASS, "class", "HYPERCAR")))
+
+    pos = _safe_int(_get_col(row, COL_POS, "position", position))
+    if pos == 0:
+        pos = position
+
+    gap_raw = _safe_str(_get_col(row, COL_GAP, "gap", "+0.000"))
+    gap = gap_raw if gap_raw else "+0.000"
+
+    interval_raw = _safe_str(_get_col(row, COL_INTERVAL, "interval", "+0.000"))
+    interval = interval_raw if interval_raw else "+0.000"
+
+    laps = _safe_int(_get_col(row, COL_LAPS, "laps", 0))
+    last_lap = _safe_str(_get_col(row, COL_LAST_LAP, "lastLap", None)) or None
+    best_lap = _safe_str(_get_col(row, COL_BEST_LAP, "bestLap", None)) or None
+
+    pit_raw = _get_col(row, COL_PIT, "pit", False)
+    in_pit = bool(pit_raw) if not isinstance(pit_raw, str) else pit_raw.lower() in ("1", "true", "pit", "p")
+
+    track_progress_raw = _get_col(row, COL_TRACK_PROGRESS, "trackProgress", None)
+    track_progress = _safe_float(track_progress_raw, 0.0)
+    track_progress = max(0.0, min(1.0, track_progress))
+
+    s1 = _parse_sector(_get_col(row, COL_S1, "s1", None))
+    s2 = _parse_sector(_get_col(row, COL_S2, "s2", None))
+    s3 = _parse_sector(_get_col(row, COL_S3, "s3", None))
+
+    return {
+        "number": number,
+        "team": team,
+        "category": category,
+        "drivers": [driver],
+        "currentDriver": driver if driver else None,
+        "position": pos,
+        "classPosition": pos,  # Will be recalculated below
+        "gapToLeader": gap,
+        "interval": interval,
+        "trackProgress": track_progress,
+        "sectors": {
+            k: v for k, v in {"s1": s1, "s2": s2, "s3": s3}.items() if v is not None
+        },
+        "lastLap": last_lap,
+        "bestLap": best_lap,
+        "inPit": in_pit,
+        "laps": laps,
+    }
+
+
+def _recalculate_class_positions(cars: list[dict]) -> list[dict]:
+    """Assign classPosition within each category group."""
+    class_counters: dict[str, int] = {}
+    result = []
+    for car in sorted(cars, key=lambda c: c["position"]):
+        cat = car["category"]
+        class_counters[cat] = class_counters.get(cat, 0) + 1
+        result.append({**car, "classPosition": class_counters[cat]})
+    return result
+
+
+def normalize_ctd(raw: Any) -> dict:
     """
-    Transform a raw CTD state dict into the internal RaceState schema.
-    raw is the full message received from Timing71 STATE_PUBLISH.
+    Top-level normalizer.
+    raw can be:
+      - dict with keys 'cars', 'session', etc. (structured CTD)
+      - list of car rows (bare timing table)
+      - dict with 'S' (state snapshot) key
     """
-    cars_raw = raw.get("cars", raw.get("entries", []))
-    session_raw = raw.get("session", raw.get("state", {}))
+    cars_raw = []
+    session_raw = {}
 
-    flag_raw = str(session_raw.get("flag", session_raw.get("trackStatus", "green"))).lower()
-    flag = FLAG_MAP.get(flag_raw, "green")
+    if isinstance(raw, dict):
+        # Structured CTD — try common key patterns
+        cars_raw = (
+            raw.get("cars")
+            or raw.get("entries")
+            or raw.get("data")
+            or raw.get("C")
+            or []
+        )
+        session_raw = (
+            raw.get("session")
+            or raw.get("Session")
+            or raw.get("S")
+            or {}
+        )
+        if not isinstance(session_raw, dict):
+            session_raw = {}
+        # Sometimes CTD wraps everything under "state"
+        if not cars_raw and "state" in raw:
+            inner = raw["state"]
+            if isinstance(inner, dict):
+                cars_raw = inner.get("cars") or inner.get("C") or []
+                session_raw = inner.get("session") or inner.get("S") or session_raw
+    elif isinstance(raw, list):
+        cars_raw = raw
 
-    time_remaining = _safe(session_raw.get("timeRemaining", session_raw.get("remainingTime")), "—")
-    elapsed = _safe(session_raw.get("elapsed", session_raw.get("elapsedTime")), "—")
-
+    # Normalize cars
     cars = []
-    for entry in cars_raw:
-        num = str(_safe(entry.get("number", entry.get("num", "?"))))
-        team = _safe(entry.get("team", entry.get("teamName", "Unknown")))
+    for i, entry in enumerate(cars_raw, start=1):
+        try:
+            cars.append(_normalize_car(entry, i))
+        except Exception:
+            pass  # Skip malformed entries
 
-        cat_raw = str(entry.get("category", entry.get("class", ""))).upper()
-        category = CATEGORY_MAP.get(cat_raw, "HYPERCAR")
+    cars = _recalculate_class_positions(cars)
 
-        drivers_raw = entry.get("drivers", entry.get("driver", []))
-        if isinstance(drivers_raw, str):
-            drivers = [drivers_raw]
-        elif isinstance(drivers_raw, list):
-            drivers = [
-                d.get("name", d) if isinstance(d, dict) else str(d)
-                for d in drivers_raw
-            ]
-        else:
-            drivers = ["Unknown"]
+    # Session
+    flag_raw = _safe_str(
+        session_raw.get("flag") or session_raw.get("trackStatus") or "green"
+    )
+    flag = _map_flag(flag_raw)
 
-        current_driver = entry.get("currentDriver", drivers[0] if drivers else None)
-
-        position = int(entry.get("position", entry.get("pos", 0)) or 0)
-        class_position = int(entry.get("classPosition", entry.get("classPos", 0)) or 0)
-
-        gap = _gap_string(entry.get("gap", entry.get("gapToLeader")))
-        interval = _gap_string(entry.get("interval", entry.get("int")))
-
-        track_progress = float(entry.get("trackProgress", entry.get("progress", 0.0)) or 0.0)
-
-        # Sector handling: CTD may use s1Time/s2Time/s3Time or sectors array
-        sectors = {}
-        for si, key_time, key_best, key_prev in [
-            ("s1", "s1Time", "s1Best", "s1Prev"),
-            ("s2", "s2Time", "s2Best", "s2Prev"),
-            ("s3", "s3Time", "s3Best", "s3Prev"),
-        ]:
-            t = entry.get(key_time)
-            b = entry.get(key_best)
-            p = entry.get(key_prev)
-            if t is not None:
-                status = _sector_status(t, b, p)
-                sectors[si] = {"time": _format_sector(t), "status": status}
-
-        # Fallback: sectors as list
-        if not sectors:
-            raw_sectors = entry.get("sectors", [])
-            for i, sec in enumerate(raw_sectors[:3]):
-                key = f"s{i+1}"
-                if isinstance(sec, dict):
-                    t = sec.get("time")
-                    b = sec.get("best")
-                    p = sec.get("prev")
-                    if t is not None:
-                        sectors[key] = {
-                            "time": _format_sector(t),
-                            "status": _sector_status(t, b, p),
-                        }
-
-        last_lap_raw = entry.get("lastLap", entry.get("lastLapTime"))
-        best_lap_raw = entry.get("bestLap", entry.get("bestLapTime"))
-
-        in_pit = bool(entry.get("inPit", entry.get("pit", False)))
-        laps = int(entry.get("laps", entry.get("lap", 0)) or 0)
-
-        cars.append({
-            "number": num,
-            "team": team,
-            "category": category,
-            "drivers": drivers,
-            "currentDriver": current_driver,
-            "position": position,
-            "classPosition": class_position,
-            "gapToLeader": gap,
-            "interval": interval,
-            "trackProgress": track_progress,
-            "sectors": sectors,
-            "lastLap": _format_time(last_lap_raw) if last_lap_raw else None,
-            "bestLap": _format_time(best_lap_raw) if best_lap_raw else None,
-            "inPit": in_pit,
-            "laps": laps,
-        })
-
-    cars.sort(key=lambda c: c["position"] if c["position"] > 0 else 9999)
+    time_remaining = _safe_str(
+        session_raw.get("timeRemaining")
+        or session_raw.get("remaining")
+        or "00:00:00"
+    )
+    elapsed = _safe_str(
+        session_raw.get("elapsed")
+        or session_raw.get("elapsedTime")
+        or "00:00:00"
+    )
+    track_name = _safe_str(
+        session_raw.get("trackName")
+        or session_raw.get("name")
+        or "Circuit de la Sarthe"
+    )
 
     return {
         "session": {
             "flag": flag,
             "timeRemaining": time_remaining,
             "elapsed": elapsed,
-            "trackName": "Circuit de la Sarthe",
+            "trackName": track_name,
         },
         "cars": cars,
         "updatedAt": int(time.time() * 1000),

@@ -1,183 +1,237 @@
-import { useEffect, useRef, useState } from 'react'
+import React, { useRef, useEffect, useState, useCallback } from 'react'
 import useRaceStore from '../store/useRaceStore'
 
-// Simplified Circuit de la Sarthe path (viewBox 0 0 800 500)
-// Key landmarks: start/finish straight, Dunlop, Tertre Rouge, Mulsanne,
-// Mulsanne corner, Indianapolis, Arnage, Porsche curves, Ford chicanes
-const TRACK_PATH =
-  'M 400 460 ' +
-  'L 580 460 L 610 450 L 630 430 L 635 400 ' + // start/finish to Dunlop
-  'L 630 360 L 620 340 L 600 330 ' +            // Dunlop curves
-  'L 560 325 L 520 320 ' +                       // towards Tertre Rouge
-  'L 490 310 L 475 290 L 470 260 ' +            // Tertre Rouge
-  'L 468 200 L 466 140 L 464 80 ' +             // Mulsanne straight begin
-  'L 462 50 L 450 30 L 430 20 ' +               // Mulsanne corner approach
-  'L 400 18 L 370 22 L 350 38 ' +               // Mulsanne corner
-  'L 340 60 L 338 100 L 336 140 ' +             // post-Mulsanne
-  'L 330 170 L 320 185 L 300 190 ' +            // Indianapolis entry
-  'L 270 192 L 250 198 L 235 215 ' +            // Indianapolis
-  'L 228 235 L 224 255 L 222 275 ' +            // Arnage approach
-  'L 220 300 L 218 320 L 215 340 ' +            // Arnage
-  'L 220 360 L 235 375 L 258 382 ' +            // post-Arnage
-  'L 285 385 L 310 382 L 330 372 ' +            // Porsche curves
-  'L 345 360 L 352 345 L 355 328 ' +            // Ford chicane 1
-  'L 358 310 L 365 295 L 375 285 ' +            // Ford chicane 2
-  'L 385 278 L 395 274 L 400 270 ' +            // towards start/finish
-  'L 400 350 L 400 460 Z'                        // back straight to S/F
+// Simplified Circuit de la Sarthe path (normalized to ~800x500 viewBox)
+// Start/finish is at approximately (680, 120)
+// Going clockwise: SF straight → Ford chicanes → Mulsanne → Indianapolis → Porsche curves → back
+const TRACK_PATH = `
+  M 680,120
+  L 720,120 L 740,130 L 750,160 L 745,200
+  L 740,240 L 745,260 L 750,280
+  L 748,300 L 740,320
+  L 720,380 L 700,430 L 680,460
+  L 640,480 L 580,490 L 520,485
+  L 200,440 L 160,420 L 140,390
+  L 130,350 L 135,310 L 150,280
+  L 160,250 L 155,220 L 140,200
+  L 120,180 L 110,160 L 115,140
+  L 130,120 L 160,105 L 200,100
+  L 260,98 L 320,100 L 380,105
+  L 440,108 L 500,110 L 560,112
+  L 620,115 L 660,118 L 680,120
+  Z
+`
 
+// Car category colors
 const CAT_COLORS = {
   HYPERCAR: '#FFD700',
-  LMP2:     '#5BC8FF',
-  LMGT3:    '#3DDC84',
+  LMP2: '#5BC8FF',
+  LMGT3: '#3DDC84',
 }
 
-function lerp(a, b, t) {
-  return a + (b - a) * t
-}
+function CarDot({ car, pathLength, pathRef }) {
+  const [pos, setPos] = useState({ x: 0, y: 0 })
+  const [hovered, setHovered] = useState(false)
+  const animRef = useRef(null)
+  const targetRef = useRef({ x: 0, y: 0 })
+  const currentRef = useRef({ x: 0, y: 0 })
 
-export default function TrackMap() {
-  const cars = useRaceStore((s) => s.raceState?.cars ?? [])
-  const filter = useRaceStore((s) => s.categoryFilter)
-  const pathRef = useRef(null)
-  const [positions, setPositions] = useState({})
-  const [tooltip, setTooltip] = useState(null)
-  const targetRef = useRef({})
-  const currentRef = useRef({})
-  const rafRef = useRef(null)
-  const reducedMotion =
-    typeof window !== 'undefined' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
-  const visible = filter === 'ALL' ? cars : cars.filter((c) => c.category === filter)
-
-  // Update targets when raceState changes
   useEffect(() => {
-    visible.forEach((car) => {
-      targetRef.current[car.number] = car.trackProgress
-    })
-  }, [cars, filter])
+    if (!pathRef.current || pathLength === 0) return
+    const len = car.trackProgress * pathLength
+    const pt = pathRef.current.getPointAtLength(len)
+    targetRef.current = { x: pt.x, y: pt.y }
 
-  // Animation loop
-  useEffect(() => {
-    if (reducedMotion) {
-      const snap = {}
-      visible.forEach((c) => { snap[c.number] = c.trackProgress })
-      setPositions(snap)
+    if (prefersReducedMotion) {
+      setPos({ x: pt.x, y: pt.y })
+      currentRef.current = { x: pt.x, y: pt.y }
       return
     }
 
+    function lerp(a, b, t) { return a + (b - a) * t }
+
     function animate() {
-      let changed = false
-      const next = { ...currentRef.current }
-      Object.keys(targetRef.current).forEach((num) => {
-        const target = targetRef.current[num]
-        const current = next[num] ?? target
-        const delta = lerp(current, target, 0.12)
-        if (Math.abs(delta - current) > 0.0001) changed = true
-        next[num] = delta
-      })
-      if (changed) {
-        currentRef.current = next
-        setPositions({ ...next })
+      currentRef.current = {
+        x: lerp(currentRef.current.x, targetRef.current.x, 0.12),
+        y: lerp(currentRef.current.y, targetRef.current.y, 0.12),
       }
-      rafRef.current = requestAnimationFrame(animate)
+      setPos({ ...currentRef.current })
+      animRef.current = requestAnimationFrame(animate)
     }
 
-    rafRef.current = requestAnimationFrame(animate)
-    return () => cancelAnimationFrame(rafRef.current)
-  }, [reducedMotion])
+    if (animRef.current) cancelAnimationFrame(animRef.current)
+    animRef.current = requestAnimationFrame(animate)
+    return () => { if (animRef.current) cancelAnimationFrame(animRef.current) }
+  }, [car.trackProgress, pathLength])
 
-  function getXY(progress) {
-    const path = pathRef.current
-    if (!path) return { x: 0, y: 0 }
-    const totalLen = path.getTotalLength()
-    const pt = path.getPointAtLength(progress * totalLen)
-    return { x: pt.x, y: pt.y }
-  }
+  if (pos.x === 0 && pos.y === 0) return null
+
+  const color = CAT_COLORS[car.category] || '#E8EAF0'
 
   return (
-    <div className="track-map">
-      <div className="panel-title">TRACK MAP</div>
-      <svg
-        className="track-svg"
-        viewBox="0 0 800 500"
-        preserveAspectRatio="xMidYMid meet"
+    <g
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{ cursor: 'pointer' }}
+    >
+      <circle
+        cx={pos.x}
+        cy={pos.y}
+        r={car.inPit ? 4 : 6}
+        fill={color}
+        opacity={car.inPit ? 0.4 : 1}
+        stroke="#0A0B0D"
+        strokeWidth={1.5}
+        style={{ filter: car.inPit ? 'none' : `drop-shadow(0 0 4px ${color})` }}
+      />
+      {/* Car number */}
+      <text
+        x={pos.x}
+        y={pos.y - 10}
+        textAnchor="middle"
+        fill={color}
+        fontSize="8"
+        fontFamily="monospace"
+        fontWeight="700"
+        style={{ pointerEvents: 'none', userSelect: 'none' }}
       >
-        {/* Track outline */}
-        <path
-          ref={pathRef}
-          d={TRACK_PATH}
-          fill="none"
-          stroke="#2a2d33"
-          strokeWidth="8"
-          strokeLinejoin="round"
-          strokeLinecap="round"
-        />
-        {/* Track centerline */}
-        <path
-          d={TRACK_PATH}
-          fill="none"
-          stroke="#3a3d45"
-          strokeWidth="4"
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          strokeDasharray="8 6"
-        />
+        #{car.number}
+      </text>
+      {/* Tooltip */}
+      {hovered && (
+        <g>
+          <rect
+            x={pos.x + 8}
+            y={pos.y - 30}
+            width={130}
+            height={50}
+            rx={4}
+            fill="#16181C"
+            stroke="#2a2d35"
+            strokeWidth={1}
+          />
+          <text x={pos.x + 14} y={pos.y - 14} fill="#E8EAF0" fontSize="9" fontFamily="monospace">
+            P{car.position} #{car.number} {car.currentDriver || car.drivers[0] || ''}
+          </text>
+          <text x={pos.x + 14} y={pos.y - 3} fill="#6B7280" fontSize="8" fontFamily="monospace">
+            {car.team}
+          </text>
+          <text x={pos.x + 14} y={pos.y + 8} fill="#FFB000" fontSize="8" fontFamily="monospace">
+            Last: {car.lastLap || '--'}
+          </text>
+        </g>
+      )}
+    </g>
+  )
+}
 
-        {/* Car dots */}
-        {visible.map((car) => {
-          const prog = positions[car.number] ?? car.trackProgress
-          const { x, y } = getXY(prog)
-          const color = CAT_COLORS[car.category]
-          return (
-            <g
+export default function TrackMap() {
+  const raceState = useRaceStore((s) => s.raceState)
+  const categoryFilter = useRaceStore((s) => s.categoryFilter)
+  const pathRef = useRef(null)
+  const [pathLength, setPathLength] = useState(0)
+
+  useEffect(() => {
+    if (pathRef.current) {
+      setPathLength(pathRef.current.getTotalLength())
+    }
+  }, [])
+
+  const cars = raceState?.cars || []
+  const filteredCars = categoryFilter === 'ALL'
+    ? cars
+    : cars.filter((c) => c.category === categoryFilter)
+
+  return (
+    <div style={{
+      background: 'var(--color-bg)',
+      border: '1px solid #2a2d35',
+      borderRadius: 8,
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden',
+      height: '100%',
+    }}>
+      <div style={{
+        padding: '0.5rem 0.75rem',
+        background: 'var(--color-surface)',
+        borderBottom: '1px solid #2a2d35',
+        fontSize: '0.7rem',
+        fontFamily: 'monospace',
+        letterSpacing: '0.1em',
+        color: 'var(--color-cyan)',
+        fontWeight: 700,
+      }}>
+        TRACK MAP — CIRCUIT DE LA SARTHE
+      </div>
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0.5rem' }}>
+        <svg
+          viewBox="80 90 700 420"
+          style={{ width: '100%', height: '100%', maxHeight: 400 }}
+          preserveAspectRatio="xMidYMid meet"
+        >
+          {/* Track outline (wider stroke = tarmac) */}
+          <path
+            d={TRACK_PATH}
+            fill="none"
+            stroke="#2a2d35"
+            strokeWidth={18}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+          {/* Track surface */}
+          <path
+            ref={pathRef}
+            d={TRACK_PATH}
+            fill="none"
+            stroke="#3a3d45"
+            strokeWidth={10}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+          {/* Start/finish line */}
+          <line x1="680" y1="108" x2="680" y2="132" stroke="#E8EAF0" strokeWidth={3} />
+
+          {/* Track labels */}
+          <text x="730" y="200" fill="#6B7280" fontSize="9" fontFamily="monospace">Mulsanne</text>
+          <text x="730" y="212" fill="#6B7280" fontSize="9" fontFamily="monospace">Straight</text>
+          <text x="120" y="175" fill="#6B7280" fontSize="9" fontFamily="monospace">Indianapolis</text>
+          <text x="130" y="280" fill="#6B7280" fontSize="9" fontFamily="monospace">Porsche</text>
+          <text x="130" y="292" fill="#6B7280" fontSize="9" fontFamily="monospace">Curves</text>
+          <text x="630" y="112" fill="#E8EAF0" fontSize="9" fontFamily="monospace">S/F</text>
+
+          {/* Car dots */}
+          {filteredCars.map((car) => (
+            <CarDot
               key={car.number}
-              transform={`translate(${x},${y})`}
-              style={{ cursor: 'pointer' }}
-              onMouseEnter={() => setTooltip({ car, x, y })}
-              onMouseLeave={() => setTooltip(null)}
-            >
-              <circle r={car.inPit ? 4 : 7} fill={color} opacity={car.inPit ? 0.4 : 1} />
-              <text
-                textAnchor="middle"
-                dy="-10"
-                fontSize="9"
-                fill={color}
-                fontFamily="monospace"
-                fontWeight="bold"
-              >
-                {car.number}
-              </text>
-            </g>
-          )
-        })}
-
-        {/* Tooltip */}
-        {tooltip && (() => {
-          const { car, x, y } = tooltip
-          const tx = Math.min(x + 12, 730)
-          const ty = Math.max(y - 50, 10)
-          return (
-            <g>
-              <rect x={tx} y={ty} width={140} height={52} rx={4}
-                fill="#16181C" stroke="#FFB000" strokeWidth={1} />
-              <text x={tx + 8} y={ty + 15} fontSize={10} fill="#FFB000" fontFamily="monospace">
-                #{car.number} P{car.position}
-              </text>
-              <text x={tx + 8} y={ty + 28} fontSize={9} fill="#ccc" fontFamily="monospace">
-                {car.currentDriver ?? car.drivers[0]}
-              </text>
-              <text x={tx + 8} y={ty + 42} fontSize={9} fill="#888" fontFamily="monospace">
-                Last: {car.lastLap ?? '—'}
-              </text>
-            </g>
-          )
-        })()}
-
-        {/* Start/finish line */}
-        <line x1="400" y1="452" x2="400" y2="468" stroke="#fff" strokeWidth="2" />
-        <text x="404" y="466" fontSize="8" fill="#888" fontFamily="monospace">S/F</text>
-      </svg>
+              car={car}
+              pathLength={pathLength}
+              pathRef={pathRef}
+            />
+          ))}
+        </svg>
+      </div>
+      {/* Legend */}
+      <div style={{
+        display: 'flex',
+        gap: '1rem',
+        padding: '0.4rem 0.75rem',
+        borderTop: '1px solid #2a2d35',
+        fontSize: '0.65rem',
+        fontFamily: 'monospace',
+      }}>
+        {Object.entries(CAT_COLORS).map(([cat, color]) => (
+          <span key={cat} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', color }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, display: 'inline-block' }} />
+            {cat}
+          </span>
+        ))}
+        <span style={{ color: 'var(--color-dim)', marginLeft: 'auto' }}>
+          {filteredCars.length} cars on track
+        </span>
+      </div>
     </div>
   )
 }
