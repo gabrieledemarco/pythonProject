@@ -1,161 +1,211 @@
-import { useEffect, useState } from 'react'
+import React, { useEffect, useState, useRef } from 'react'
 
+// Le Mans circuit coordinates
 const LAT = 47.9359
 const LON = 0.2220
-const REFRESH_MS = 5 * 60 * 1000
 
-const TRACK_PATH_MINI =
-  'M 200 230 L 290 230 L 305 225 L 315 215 L 317 200 ' +
-  'L 315 180 L 310 170 L 300 165 L 280 163 L 260 160 ' +
-  'L 245 155 L 237 145 L 235 130 L 234 70 L 232 40 ' +
-  'L 231 25 L 225 15 L 215 10 L 200 9 L 185 11 ' +
-  'L 175 19 L 170 30 L 168 50 L 166 85 ' +
-  'L 165 100 L 160 110 L 150 115 ' +
-  'L 135 116 L 125 119 L 117 128 ' +
-  'L 114 140 L 112 155 L 111 170 ' +
-  'L 112 183 L 118 192 L 129 196 ' +
-  'L 143 197 L 155 194 L 165 188 ' +
-  'L 173 182 L 176 173 L 176 163 ' +
-  'L 179 155 L 183 147 L 188 142 ' +
-  'L 193 139 L 200 137 L 200 180 L 200 230 Z'
+const WEATHER_URL = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=temperature_2m,apparent_temperature,precipitation,rain,windspeed_10m,winddirection_10m,relativehumidity_2m,surface_pressure&hourly=temperature_2m,precipitation_probability,precipitation&forecast_days=1&timezone=Europe%2FParis`
 
-function WindArrow({ deg }) {
-  const rad = (deg * Math.PI) / 180
-  const x2 = 12 + Math.sin(rad) * 10
-  const y2 = 12 - Math.cos(rad) * 10
-  return (
-    <svg width="24" height="24" style={{ display: 'inline', verticalAlign: 'middle' }}>
-      <circle cx="12" cy="12" r="10" fill="none" stroke="#333" strokeWidth="1" />
-      <line x1="12" y1="12" x2={x2} y2={y2} stroke="#FFB000" strokeWidth="2" strokeLinecap="round" />
-    </svg>
-  )
+const REFRESH_MS = 5 * 60 * 1000 // 5 minutes
+
+const WIND_DIRS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+function windDirection(deg) {
+  return WIND_DIRS[Math.round(deg / 45) % 8]
 }
 
-function PrecipBar({ values }) {
-  if (!values || values.length === 0) return null
+// Mini track path for background decoration (same shape, scaled down)
+const MINI_TRACK_PATH = `M 68,12 L 72,12 L 74,13 L 75,16 L 74.5,20 L 74,24 L 74.5,26 L 75,28 L 74.8,30 L 74,32 L 72,38 L 70,43 L 68,46 L 64,48 L 58,49 L 52,48.5 L 20,44 L 16,42 L 14,39 L 13,35 L 13.5,31 L 15,28 L 16,25 L 15.5,22 L 14,20 L 12,18 L 11,16 L 11.5,14 L 13,12 L 16,10.5 L 20,10 L 26,9.8 L 32,10 L 38,10.5 L 44,10.8 L 50,11 L 56,11.2 L 62,11.5 L 66,11.8 L 68,12 Z`
+
+function PrecipBar({ hour, prob, current }) {
+  const h = new Date()
+  h.setHours(current + hour, 0, 0, 0)
+  const label = h.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+  const height = Math.max(2, (prob / 100) * 48)
+  const color = prob > 70 ? '#5BC8FF' : prob > 40 ? '#FFB000' : '#3DDC84'
+
   return (
-    <div className="precip-bars">
-      {values.map((v, i) => (
-        <div key={i} className="precip-col">
-          <div
-            className="precip-fill"
-            style={{ height: `${v}%`, background: v > 50 ? '#5BC8FF' : '#2a4a6a' }}
-          />
-          <span className="precip-label">{v}%</span>
-          <span className="precip-hour">+{i + 1}h</span>
-        </div>
-      ))}
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.2rem', flex: 1 }}>
+      <div style={{
+        height: 48,
+        width: '100%',
+        display: 'flex',
+        alignItems: 'flex-end',
+        justifyContent: 'center',
+      }}>
+        <div style={{
+          width: '60%',
+          height,
+          background: color,
+          borderRadius: '2px 2px 0 0',
+          opacity: 0.85,
+        }} />
+      </div>
+      <span style={{ color: '#6B7280', fontSize: '0.55rem', fontFamily: 'monospace' }}>{label}</span>
+      <span style={{ color, fontSize: '0.6rem', fontFamily: 'monospace', fontWeight: 700 }}>{prob}%</span>
     </div>
   )
 }
 
 export default function WeatherWidget() {
   const [weather, setWeather] = useState(null)
-  const [precip, setPrecip] = useState([])
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const intervalRef = useRef(null)
 
   async function fetchWeather() {
     try {
-      const url =
-        `https://api.open-meteo.com/v1/forecast` +
-        `?latitude=${LAT}&longitude=${LON}` +
-        `&current=temperature_2m,apparent_temperature,precipitation,rain,` +
-        `windspeed_10m,winddirection_10m,relativehumidity_2m,surface_pressure` +
-        `&hourly=precipitation_probability` +
-        `&forecast_days=1&timezone=Europe%2FParis`
-      const res = await fetch(url)
+      const res = await fetch(WEATHER_URL)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
-      setWeather(data.current)
-
-      // next 6 hours precipitation probability
-      const now = new Date()
-      const currentHour = now.getHours()
-      const times = data.hourly.time ?? []
-      const probs = data.hourly.precipitation_probability ?? []
-      const next6 = []
-      for (let i = 0; i < times.length && next6.length < 6; i++) {
-        const h = new Date(times[i]).getHours()
-        if (h > currentHour) next6.push(probs[i] ?? 0)
-      }
-      setPrecip(next6)
+      setWeather(data)
       setError(null)
-    } catch (e) {
-      setError(e.message)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
     }
   }
 
   useEffect(() => {
     fetchWeather()
-    const id = setInterval(fetchWeather, REFRESH_MS)
-    return () => clearInterval(id)
+    intervalRef.current = setInterval(fetchWeather, REFRESH_MS)
+    return () => clearInterval(intervalRef.current)
   }, [])
 
+  const current = weather?.current
+  const hourly = weather?.hourly
+
+  // Get next 6 hours of precip probability
+  const now = new Date()
+  const currentHour = now.getHours()
+  const times = hourly?.time || []
+  const precipProbs = hourly?.precipitation_probability || []
+  const next6 = []
+  for (let i = 0; i < times.length && next6.length < 6; i++) {
+    const t = new Date(times[i])
+    if (t.getHours() >= currentHour) {
+      next6.push({ hour: next6.length, time: t, prob: precipProbs[i] || 0 })
+    }
+  }
+
   return (
-    <div className="weather-widget">
-      <div className="panel-title">WEATHER · Circuit de la Sarthe</div>
+    <div style={{
+      background: 'var(--color-bg)',
+      border: '1px solid #2a2d35',
+      borderRadius: 8,
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden',
+      height: '100%',
+      position: 'relative',
+    }}>
+      {/* Background mini track */}
+      <div style={{
+        position: 'absolute',
+        bottom: 8,
+        right: 8,
+        opacity: 0.06,
+        pointerEvents: 'none',
+      }}>
+        <svg viewBox="8 8 70 45" width={120} height={80}>
+          <path d={MINI_TRACK_PATH} fill="none" stroke="#E8EAF0" strokeWidth={3} strokeLinejoin="round" />
+        </svg>
+      </div>
 
-      <div className="weather-body">
-        <div className="weather-main">
-          {error && <div className="weather-error">⚠ {error}</div>}
-          {!weather && !error && <div className="weather-loading">Loading…</div>}
-          {weather && (
-            <div className="weather-grid">
-              <div className="wx-item">
-                <span className="wx-label">AIR TEMP</span>
-                <span className="wx-value">{weather.temperature_2m}°C</span>
-              </div>
-              <div className="wx-item">
-                <span className="wx-label">FEELS LIKE</span>
-                <span className="wx-value">{weather.apparent_temperature}°C</span>
-              </div>
-              <div className="wx-item">
-                <span className="wx-label">RAIN</span>
-                <span className="wx-value">{weather.rain ?? weather.precipitation} mm</span>
-              </div>
-              <div className="wx-item">
-                <span className="wx-label">WIND</span>
-                <span className="wx-value">
-                  <WindArrow deg={weather.winddirection_10m} />
-                  {weather.windspeed_10m} km/h
-                </span>
-              </div>
-              <div className="wx-item">
-                <span className="wx-label">HUMIDITY</span>
-                <span className="wx-value">{weather.relativehumidity_2m}%</span>
-              </div>
-              <div className="wx-item">
-                <span className="wx-label">PRESSURE</span>
-                <span className="wx-value">{weather.surface_pressure} hPa</span>
-              </div>
+      <div style={{
+        padding: '0.5rem 0.75rem',
+        background: 'var(--color-surface)',
+        borderBottom: '1px solid #2a2d35',
+        fontSize: '0.7rem',
+        fontFamily: 'monospace',
+        letterSpacing: '0.1em',
+        color: 'var(--color-cyan)',
+        fontWeight: 700,
+        flexShrink: 0,
+      }}>
+        WEATHER — LE MANS
+        {!loading && (
+          <span style={{ color: 'var(--color-dim)', marginLeft: '0.5rem', fontWeight: 400 }}>
+            {new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+          </span>
+        )}
+      </div>
+
+      <div style={{ flex: 1, padding: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', overflowY: 'auto' }}>
+        {loading && (
+          <div style={{ color: 'var(--color-dim)', fontFamily: 'monospace', fontSize: '0.75rem', textAlign: 'center', paddingTop: '1rem' }}>
+            Fetching weather…
+          </div>
+        )}
+        {error && (
+          <div style={{ color: 'var(--color-red)', fontFamily: 'monospace', fontSize: '0.7rem' }}>
+            Weather unavailable: {error}
+          </div>
+        )}
+        {current && (
+          <>
+            {/* Temperature row */}
+            <div style={{ display: 'flex', gap: '1rem', alignItems: 'baseline' }}>
+              <span style={{ fontSize: '2rem', fontWeight: 700, fontFamily: 'monospace', color: 'var(--color-amber)', lineHeight: 1 }}>
+                {Math.round(current.temperature_2m)}°C
+              </span>
+              <span style={{ color: 'var(--color-dim)', fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                Feels {Math.round(current.apparent_temperature)}°C
+              </span>
             </div>
-          )}
 
-          <div className="wx-forecast-label">PRECIP. FORECAST</div>
-          <PrecipBar values={precip} />
-        </div>
+            {/* Stats grid */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: '0.4rem',
+              fontSize: '0.7rem',
+              fontFamily: 'monospace',
+            }}>
+              {[
+                { label: 'WIND', value: `${Math.round(current.windspeed_10m)} km/h ${windDirection(current.winddirection_10m)}`, color: 'var(--color-cyan)' },
+                { label: 'RAIN', value: `${current.rain ?? current.precipitation ?? 0} mm`, color: '#5BC8FF' },
+                { label: 'HUMIDITY', value: `${current.relativehumidity_2m}%`, color: 'var(--color-text)' },
+                { label: 'PRESSURE', value: `${Math.round(current.surface_pressure)} hPa`, color: 'var(--color-text)' },
+              ].map(({ label, value, color }) => (
+                <div key={label} style={{
+                  background: 'var(--color-surface)',
+                  borderRadius: 4,
+                  padding: '0.3rem 0.5rem',
+                  border: '1px solid #2a2d35',
+                }}>
+                  <div style={{ color: 'var(--color-dim)', fontSize: '0.6rem', marginBottom: 2 }}>{label}</div>
+                  <div style={{ color, fontWeight: 700 }}>{value}</div>
+                </div>
+              ))}
+            </div>
 
-        <div className="weather-map">
-          <svg viewBox="0 0 400 250" width="100%" height="100%">
-            <path
-              d={TRACK_PATH_MINI}
-              fill="none"
-              stroke="#1e2228"
-              strokeWidth="6"
-              strokeLinejoin="round"
-            />
-            <path
-              d={TRACK_PATH_MINI}
-              fill="none"
-              stroke="#2a3040"
-              strokeWidth="3"
-              strokeLinejoin="round"
-            />
-            <text x="196" y="245" fontSize="8" fill="#444" fontFamily="monospace" textAnchor="middle">
-              Circuit de la Sarthe · 13.626 km
-            </text>
-          </svg>
-        </div>
+            {/* Precip forecast bars */}
+            {next6.length > 0 && (
+              <div>
+                <div style={{
+                  color: 'var(--color-dim)',
+                  fontFamily: 'monospace',
+                  fontSize: '0.62rem',
+                  letterSpacing: '0.06em',
+                  marginBottom: '0.4rem',
+                }}>
+                  PRECIP. PROBABILITY — NEXT 6H
+                </div>
+                <div style={{ display: 'flex', gap: '0.2rem', alignItems: 'flex-end' }}>
+                  {next6.map((item) => (
+                    <PrecipBar
+                      key={item.hour}
+                      hour={item.hour}
+                      prob={item.prob}
+                      current={currentHour}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   )
