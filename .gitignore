@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+*.log
+*.jsonl
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+ctd_dump*.json
+ctd_dump*.jsonl

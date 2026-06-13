@@ -1,0 +1,7 @@
+relay_discovery_url: "https://www.timing71.org/relays"
+event_match: "Le Mans"
+ws_port: 8771
+rest_port: 8771
+log_file: "bridge.log"
+reconnect_max_delay: 60
+heartbeat_interval: 30

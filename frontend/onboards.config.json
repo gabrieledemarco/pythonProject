@@ -1,0 +1,72 @@
+[
+  {
+    "id": "toyota7",
+    "label": "Toyota #7 Onboard",
+    "team": "Toyota Gazoo Racing",
+    "category": "HYPERCAR",
+    "youtubeId": "dQw4w9WgXcQ"
+  },
+  {
+    "id": "toyota8",
+    "label": "Toyota #8 Onboard",
+    "team": "Toyota Gazoo Racing",
+    "category": "HYPERCAR",
+    "youtubeId": "dQw4w9WgXcQ"
+  },
+  {
+    "id": "ferrari50",
+    "label": "Ferrari #50 Onboard",
+    "team": "Ferrari AF Corse",
+    "category": "HYPERCAR",
+    "youtubeId": "dQw4w9WgXcQ"
+  },
+  {
+    "id": "ferrari51",
+    "label": "Ferrari #51 Onboard",
+    "team": "Ferrari AF Corse",
+    "category": "HYPERCAR",
+    "youtubeId": "dQw4w9WgXcQ"
+  },
+  {
+    "id": "porsche5",
+    "label": "Porsche #5 Onboard",
+    "team": "Porsche Penske Motorsport",
+    "category": "HYPERCAR",
+    "youtubeId": "dQw4w9WgXcQ"
+  },
+  {
+    "id": "porsche6",
+    "label": "Porsche #6 Onboard",
+    "team": "Porsche Penske Motorsport",
+    "category": "HYPERCAR",
+    "youtubeId": "dQw4w9WgXcQ"
+  },
+  {
+    "id": "united22",
+    "label": "United Autosports #22 Onboard",
+    "team": "United Autosports",
+    "category": "LMP2",
+    "youtubeId": "dQw4w9WgXcQ"
+  },
+  {
+    "id": "prema9",
+    "label": "Prema #9 Onboard",
+    "team": "Prema Racing",
+    "category": "LMP2",
+    "youtubeId": "dQw4w9WgXcQ"
+  },
+  {
+    "id": "ford77",
+    "label": "Ford Mustang #77 Onboard",
+    "team": "Proton Competition",
+    "category": "LMGT3",
+    "youtubeId": "dQw4w9WgXcQ"
+  },
+  {
+    "id": "corvette33",
+    "label": "Corvette Racing #33 Onboard",
+    "team": "Corvette Racing",
+    "category": "LMGT3",
+    "youtubeId": "dQw4w9WgXcQ"
+  }
+]
