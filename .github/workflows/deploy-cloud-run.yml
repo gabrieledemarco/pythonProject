@@ -1,0 +1,67 @@
+name: Deploy Cloud Run Job
+
+on:
+  push:
+    branches:
+      - claude/cloud-run-hello-print-8rglwh
+    paths:
+      - 'hello/**'
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: europe-west1
+  IMAGE: europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/hello-repo/hello-print
+  JOB_NAME: hello-print
+
+jobs:
+  deploy:
+    name: Build & Deploy to Cloud Run Job
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+
+      - name: Create Artifact Registry repository (if missing)
+        run: |
+          gcloud artifacts repositories describe hello-repo \
+            --location=$REGION --project=$PROJECT_ID 2>/dev/null || \
+          gcloud artifacts repositories create hello-repo \
+            --repository-format=docker \
+            --location=$REGION \
+            --project=$PROJECT_ID
+
+      - name: Build & push Docker image
+        run: |
+          docker build -t $IMAGE:${{ github.sha }} hello/
+          docker push $IMAGE:${{ github.sha }}
+
+      - name: Deploy Cloud Run Job
+        run: |
+          gcloud run jobs deploy $JOB_NAME \
+            --image=$IMAGE:${{ github.sha }} \
+            --region=$REGION \
+            --project=$PROJECT_ID
+
+      - name: Execute Cloud Run Job
+        run: |
+          gcloud run jobs execute $JOB_NAME \
+            --region=$REGION \
+            --project=$PROJECT_ID \
+            --wait
